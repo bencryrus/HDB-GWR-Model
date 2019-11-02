@@ -1,0 +1,196 @@
+---
+title: "gwr"
+author: "Ben"
+date: "1 April 2019"
+output: html_document
+---
+Library imports
+```{r message=FALSE, warning=FALSE}
+packages = c('sf', 'GWmodel', 'tidyverse', 'tmap', 'ggplot2', 'rgdal', 'xts')
+for (p in packages){
+  if(!require(p, character.only = T)){
+    install.packages(p)
+  }
+  library(p,character.only = T)
+}
+```
+
+Data import
+```{r}
+# Import
+hdb.comp <- readOGR('data/spatial/HDB2018/HDB Comp Aug to Dec 2018.shp')
+colnames(hdb.comp@data) <- c('SN','Month','Town','Flat_type','Block','Street_name',
+                        'Storey_range','Floor_area','Flat_model','Lease_commenced',
+                        'Remaining_lease','Resale_price','Query','SEARCHVAL',
+                        'BLK_NO','ROAD_NAME','BUILDING','ADDRESS','POSTAL',
+                        'LATITUDE','LONGITUDE','LONGTITUDE','Query_sent',
+                        'Hawker_Count', 'Mall_Count', 'MLRT_Count', 
+                        'PriSchool_Count', 'PPriSchool_Count', 
+                        'Supermarket_Count', 'PPreSchool_Count',
+                        'Eldercare_Count', 'Storey',
+                        '1 ROOM', '2 ROOM', '3 ROOM', '4 ROOM', '5 ROOM',
+                        'EXECUTIVE', 'MULTI-GENERATION', 
+                        'Adjoined flat', 'Apartment', 'DBSS', 'Improved',
+                        'Improved-Maisonette', 'Maisonette', 
+                        'Model A', 'Model A-Maisonette',
+                        'Model A2', 'Multi Generation', 'New Generation', 
+                        'Premium Apartment', 'Premium Apartment Loft', 
+                        'Premium Apartment.','Premium Maisonette', 
+                        'Simplified', 'Standard', 'Terrace', 
+                        'Type S1', 'Type S2')
+
+hdb.comp.sf <- st_as_sf(hdb.comp)
+hdb.comp.sf <- st_difference(hdb.comp.sf)
+# Filter date
+hdb.comp.sf$date <- as.yearmon(hdb.comp.sf$Month, format = '%Y-%m') 
+hdb.comp.sf <- filter(hdb.comp.sf, date >= 'Oct 2018' & date <= 'Dec 2018')
+
+# Convert to spatial
+hdb.comp.sp <- as_Spatial(hdb.comp.sf)
+
+# Flat type encoding
+ft_encoding <- function(data){
+  data$Flat_type <- as.character(data$Flat_type)
+  data[data$Flat_type == '1 ROOM', 'Flat_type'] <- 1
+  data[data$Flat_type == '2 ROOM', 'Flat_type'] <- 2
+  data[data$Flat_type == '3 ROOM', 'Flat_type'] <- 3
+  data[data$Flat_type == '4 ROOM', 'Flat_type'] <- 4
+  data[data$Flat_type == '5 ROOM', 'Flat_type'] <- 5
+  data[data$Flat_type == 'EXECUTIVE', 'Flat_type'] <- 6
+  data[data$Flat_type == 'MULTI-GENERATION', 'Flat_type'] <- 7
+  data$Flat_type <- as.numeric(data$Flat_type)
+}
+
+hdb.comp.sp$Flat_type <- ft_encoding(hdb.comp.sp)
+
+# Combining flat models
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Adjoined flat' , 'Flat_model'] <- 'DBSS'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Apartment' , 'Flat_model'] <- 'DBSS'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Improved-Maisonette' , 'Flat_model'] <- 'Maisonette'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Model A-Maisonette' , 'Flat_model'] <- 'Maisonette'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Model A2' , 'Flat_model'] <- 'Model A'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Multi Generation' , 'Flat_model'] <- 'DBSS'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'New Generation' , 'Flat_model'] <- 'Standard'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Premium Apartment.' , 'Flat_model'] <- 'Premium Apartment'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Terrace' , 'Flat_model'] <- 'DBSS'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Type S1' , 'Flat_model'] <- 'DBSS'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Type S2' , 'Flat_model'] <- 'DBSS'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Standard' , 'Flat_model'] <- 'Improved'
+
+```
+
+GWR
+```{r include=FALSE}
+# Import
+hdb.comp.sp <- readOGR('data/spatial/HDB2018/HDB Compiled GWR 2018.shp')
+colnames(hdb.comp.sp@data) <- c('SN','Month','Town','Flat_type',
+                             'Block','Street_name','Storey_range',
+                             'Floor_area','Flat_model','Lease_commenced',
+                        'Remaining_lease','Resale_price','Query','SEARCHVAL',
+                        'BLK_NO','ROAD_NAME','BUILDING','ADDRESS','POSTAL',
+                        'LATITUDE','LONGITUDE','LONGTITUDE','Query_sent',
+                        'Hawker_Count', 'Mall_Count', 'MLRT_Count', 
+                        'PriSchool_Count', 'PPriSchool_Count', 
+                        'Supermarket_Count', 'PPreSchool_Count',
+                        'Eldercare_Count', 'Storey',
+                        '1 ROOM', '2 ROOM', '3 ROOM', '4 ROOM', '5 ROOM',
+                        'EXECUTIVE', 'MULTI-GENERATION', 
+                        'Adjoined flat', 'Apartment', 'DBSS', 'Improved',
+                        'Improved-Maisonette', 'Maisonette', 
+                        'Model A', 'Model A-Maisonette',
+                        'Model A2', 'Multi Generation', 'New Generation', 
+                        'Premium Apartment', 'Premium Apartment Loft', 
+                        'Premium Apartment.','Premium Maisonette', 
+                        'Simplified', 'Standard', 'Terrace', 
+                        'Type S1', 'Type S2')
+
+# Bandwidth distance
+DM<-gw.dist(dp.locat=coordinates(hdb.comp.sp))
+bw.adaptive <- bw.gwr(formula = Resale_price ~ Floor_area + 
+                        Remaining_lease + Storey + Flat_type + Hawker_Count +
+                        Mall_Count + MLRT_Count + PPriSchool_Count +
+                        PriSchool_Count + Supermarket_Count + 
+                        PPreSchool_Count + Eldercare_Count,
+                      data=hdb.comp.sp[hdb.comp.sp$Flat_model == 'DBSS',], 
+                      approach="CV",
+                      kernel="tricube",
+                      adaptive=TRUE,
+                      longlat=FALSE)
+
+# GWR Model
+gwr.adaptive <- gwr.basic(formula = Resale_price ~ Floor_area + 
+                       Remaining_lease + Storey +
+                       Flat_type +  Hawker_Count + Mall_Count + MLRT_Count + 
+                       PPriSchool_Count + PriSchool_Count + Supermarket_Count +
+                       PPreSchool_Count + Eldercare_Count,
+                     data = hdb.comp.sp[hdb.comp.sp$Flat_model == 'DBSS', ],
+                     bw = 25,
+                     kernel = 'gaussian',
+                     adaptive = TRUE,
+                     longlat = FALSE)
+
+gwr.adaptive2 <- gwr.basic(formula = Resale_price ~ Floor_area + 
+                       Remaining_lease + Storey +
+                       Flat_type +  Hawker_Count + Mall_Count + MLRT_Count + 
+                       PPriSchool_Count + PriSchool_Count + Supermarket_Count +
+                       PPreSchool_Count + Eldercare_Count,
+                     data = hdb.comp.sp[1:300,],
+                     bw = 25,
+                     kernel = 'gaussian',
+                     adaptive = TRUE,
+                     longlat = FALSE)
+
+# GWR Model prediction
+preds <- gwr.predict(formula = Resale_price ~ Floor_area + 
+                       Remaining_lease + Storey +
+                       Flat_type +  Hawker_Count + Mall_Count + MLRT_Count + 
+                       PPriSchool_Count + PriSchool_Count + Supermarket_Count +
+                       PPreSchool_Count + Eldercare_Count,
+                     data = hdb.comp.sp[hdb.comp.sp$Flat_model == 'Improved',],
+                     predictdata = hdb.comp.sp[1:100,],
+                     bw = 15,
+                     kernel = 'gaussian',
+                     adaptive = TRUE,
+                     longlat = FALSE)
+
+preds.df <- as.data.frame(preds$SDF)
+model.lm <- readRDS('data/models/linear regression.rds')
+
+# Mixed GWR Model
+mgwr.adaptive <- gwr.mixed(formula = Resale_price ~ Floor_area + 
+                       Remaining_lease + Storey +
+                       Flat_type +  Hawker_Count + Mall_Count + 
+                       MLRT_Count + PPriSchool_Count + 
+                       PriSchool_Count + Supermarket_Count +
+                       PPreSchool_Count + Eldercare_Count,
+                     data = hdb.comp.sp[1:10,],
+                     fixed.vars = 'Floor_area',
+                     bw = 15,
+                     kernel = 'gaussian',
+                     adaptive = TRUE,
+                     longlat = FALSE)
+```
+
+Results
+```{r}
+# GWR
+GWR.AIC <- gwr.adaptive$GW.diagnostic$AIC
+GWR.AICc <- gwr.adaptive$GW.diagnostic$AICc
+GWR.ENP <- gwr.adaptive$GW.diagnostic$enp
+GWR.EDF <- gwr.adaptive$GW.diagnosti$edf
+gwr.df <- as.data.frame(list(GWR.AIC, GWR.AICc, GWR.ENP,GWR.EDF),
+                        col.names = c('AIC', 'AICc',
+                                      'Effective Number of Parameters',
+                                      'Effective Degrees of Freedom'))
+gwr.df <- as.data.frame(t(as.matrix(gwr.df)), row.names = c('AIC', 'AICc',
+                                      'Effective Number of Parameters',
+                                      'Effective Degrees of Freedom'))
+# MLR
+MLR.Sigma <-summary(gwr.adaptive$lm)$`sigma`
+MLR.DF <- unlist(summary(gwr.adaptive$lm)$df)[2]
+
+
+```
+
+
+

@@ -1,0 +1,231 @@
+---
+title: "Horse racing model draft 1"
+author: "Ben"
+date: "23 March 2019"
+output: html_document
+---
+
+Libraries
+```{r}
+packages = c('tidyverse', 'caTools', 'caret', 'gbm', 'nnet', 'xgboost', 'sf', 'rgdal')
+for (p in packages){
+  if(!require(p, character.only = T)){
+    install.packages(p)
+  }
+  library(p,character.only = T)
+}
+```
+
+Data import & Split
+```{r}
+# Data import
+hdb.comp <- readOGR('data/spatial/HDB2018/HDB Compiled.shp')
+colnames(hdb.comp@data) <- c('SN','Month','Town','Flat_type','Block','Street_name',
+                        'Storey_range','Floor_area','Flat_model','Lease_commenced',
+                        'Remaining_lease','Resale_price','Query','SEARCHVAL',
+                        'BLK_NO','ROAD_NAME','BUILDING','ADDRESS','POSTAL',
+                        'LATITUDE','LONGITUDE','LONGTITUDE','Query_sent',
+                        'Hawker_Count', 'Mall_Count', 'MLRT_Count', 
+                        'PriSchool_Count', 'PPriSchool_Count', 
+                        'Supermarket_Count', 'PPreSchool_Count',
+                        'Eldercare_Count', 'Storey',
+                        '1 ROOM', '2 ROOM', '3 ROOM', '4 ROOM', '5 ROOM',
+                        'EXECUTIVE', 'MULTI-GENERATION', 
+                        'Adjoined flat', 'Apartment', 'DBSS', 'Improved',
+                        'Improved-Maisonette', 'Maisonette', 
+                        'Model A', 'Model A-Maisonette',
+                        'Model A2', 'Multi Generation', 'New Generation', 
+                        'Premium Apartment', 'Premium Apartment Loft', 
+                        'Premium Apartment.','Premium Maisonette', 
+                        'Simplified', 'Standard', 'Terrace', 
+                        'Type S1', 'Type S2')
+hdb.comp <- st_as_sf(hdb.comp)
+hdb.df <- as.data.frame(hdb.comp)
+
+# Test-train split
+split <- createDataPartition(hdb.df$Resale_price, p=0.70, list=FALSE)
+trainSet <- hdb.df[ split,]
+testSet <- hdb.df[-split,]
+```
+
+xgBoost
+```{r include=FALSE}
+# Parameters
+outcomeName <- 'Resale_price'
+predictors <- c('Floor_area', 'Remaining_lease', 'Storey',
+                '1 ROOM', '2 ROOM', '3 ROOM', '4 ROOM', '5 ROOM',
+                'EXECUTIVE', 'MULTI-GENERATION', 
+                'Adjoined flat', 'Apartment', 'DBSS', 'Improved',
+                'Improved-Maisonette', 'Maisonette', 'Model A', 'Model A-Maisonette',
+                'Model A2', 'Multi Generation', 'New Generation', 
+                'Premium Apartment', 'Premium Apartment Loft', 'Premium Apartment.',
+                'Premium Maisonette', 'Simplified', 'Standard', 'Terrace', 
+                'Type S1', 'Type S2',
+                'Hawker_Count', 'Mall_Count', 'MLRT_Count', 
+                'PriSchool_Count', 'PPriSchool_Count', 
+                'Supermarket_Count', 'PPreSchool_Count',
+                'Eldercare_Count')
+
+# Model train
+# model_xgboost <- train(trainSet[,predictors], trainSet$Resale_price,
+#                        method='xgbLinear')
+# saveRDS(model_xgboost, 'xgboost.rds')
+model_xgboost <- readRDS('xgboost.rds')
+
+# Predictions
+# test.hdb <- hdb.ext.factors(flat_type = '3 ROOM', 
+#                             flat_model = 'Model A', 
+#                             floor = 5, 
+#                             floor_area = 70, 
+#                             remaining_lease = 92, 
+#                             postal_code = 562308)
+
+xgboost.predictions <- predict(object = model_xgboost, 
+                                  testSet[,predictors], type="raw")
+
+# Model evaluation
+xgboost.results <- cbind(testSet$Resale_price, xgboost.predictions)
+colnames(xgboost.results) <- c('pred', 'obs')
+xgboost.df <- as.data.frame(xgboost.results)
+defaultSummary(xgboost.df)
+
+# Variable importance
+varImp(object=model_xgboost)
+plot(varImp(object=model_xgboost), main="xgBoost - Variable Importance")
+
+```
+
+Linear regression
+```{r}
+# Parameters
+outcomeName <- 'Resale_price'
+predictors <- c('Floor_area', 'Remaining_lease', 'Storey',
+                '1 ROOM', '2 ROOM', '3 ROOM', '4 ROOM', '5 ROOM',
+                'EXECUTIVE', 'MULTI-GENERATION', 
+                'Adjoined flat', 'Apartment', 'DBSS', 'Improved',
+                'Improved-Maisonette', 'Maisonette', 'Model A', 'Model A-Maisonette',
+                'Model A2', 'Multi Generation', 'New Generation', 
+                'Premium Apartment', 'Premium Apartment Loft', 'Premium Apartment.',
+                'Premium Maisonette', 'Simplified', 'Standard', 'Terrace', 
+                'Type S1', 'Type S2',
+                'Hawker_Count', 'Mall_Count', 'MLRT_Count', 
+                'PriSchool_Count', 'PPriSchool_Count', 
+                'Supermarket_Count', 'PPreSchool_Count',
+                'Eldercare_Count')
+
+# Model train
+# model_lm <- train(trainSet[,predictors], trainSet$Resale_price,
+#                        method='lm')
+# saveRDS(model_lm, 'linear regression.rds')
+model_lm <- readRDS('data/models/linear regression.rds')
+
+# Predictions
+lm.predictions <- predict.train(object = model_lm, 
+                                  testSet[,predictors], type="raw")
+
+# Model evaluation
+lm.results <- cbind(testSet$Resale_price, lm.predictions)
+colnames(lm.results) <- c('pred', 'obs')
+lm.df <- as.data.frame(lm.results)
+defaultSummary(lm.df)
+
+# Variable importance
+varImp(object=model_lm)
+plot(varImp(object=model_lm), main="Linear Regression - Variable Importance")
+```
+
+
+###############################################################################################################################################################################################################################################################
+
+
+Prep for linear regression
+```{r}
+# Change names
+colnames(hdb.comp@data) <- c('SN','Month','Town','Flat_type','Block','Street_name',
+                        'Storey_range','Floor_area','Flat_model','Lease_commenced',
+                        'Remaining_lease','Resale_price','Query','SEARCHVAL',
+                        'BLK_NO','ROAD_NAME','BUILDING','ADDRESS','POSTAL',
+                        'LATITUDE','LONGITUDE','LONGTITUDE','Query_sent',
+                        'Hawker_Count', 'Mall_Count', 'MLRT_Count', 
+                        'PriSchool_Count', 'PPriSchool_Count', 
+                        'Supermarket_Count', 'PPreSchool_Count',
+                        'Eldercare_Count', 'Storey',
+                        '1 ROOM', '2 ROOM', '3 ROOM', '4 ROOM', '5 ROOM',
+                        'EXECUTIVE', 'MULTI-GENERATION', 
+                        'Adjoined flat', 'Apartment', 'DBSS', 'Improved',
+                        'Improved-Maisonette', 'Maisonette', 
+                        'Model A', 'Model A-Maisonette',
+                        'Model A2', 'Multi Generation', 'New Generation', 
+                        'Premium Apartment', 'Premium Apartment Loft', 
+                        'Premium Apartment.','Premium Maisonette', 
+                        'Simplified', 'Standard', 'Terrace', 
+                        'Type S1', 'Type S2')
+hdb.comp <- st_as_sf(hdb.comp)
+
+# Test train split
+library(caTools)
+split <- sample.split(hdb.comp$Resale_price, SplitRatio = 0.70)
+train <- subset(hdb.comp, split = TRUE)
+test <- subset(hdb.comp, split = FALSE)
+
+```
+
+Linear regression (General version)
+```{r}
+# General version
+g.model <- lm(Resale_price ~ Floor_area + Remaining_lease +
+              `2 ROOM` + `3 ROOM` + `4 ROOM` + `5 ROOM` + EXECUTIVE +
+              `Adjoined flat` + `Apartment` + `DBSS` + `Improved` +
+              `Maisonette` + `Model A` + `Model A-Maisonette` +
+              `Model A2` + `New Generation` + `Premium Apartment` +
+              `Premium Apartment.` + `Simplified` + `Standard` + `Terrace` +
+              `Type S1` + `Type S2` + `Improved-Maisonette` + `Multi Generation` +
+              `Premium Apartment Loft` + `Premium Maisonette` +
+              Hawker_Count + Mall_Count + MLRT_Count + PPriSchool_Count +
+              PriSchool_Count + Supermarket_Count + PPreSchool_Count +
+              Eldercare_Count, data = train)
+summary(g.model)
+# Executive variable not counted in linear regression, why leh
+
+g.model.preds <- predict(g.model, test)
+g.model.results <- cbind(g.model.preds, test$Resale_price)
+colnames(g.model.results) <- c('Prediction','Actual')
+g.model.results <- as.data.frame(g.model.results)
+g.model.mse <- mean((g.model.results$Actual - g.model.results$Prediction))
+
+```
+
+
+Linear regression (By different flat models)
+```{r}
+Flat_models <- sort(unique(hdb.comp$Flat_model))
+model_names <- c('model.adjoined_flat', 'model.apartment', 'model.DBSS',
+                 'model.Improved', 'model.Maisonette', 'model.Model_A',
+                 'model.Model_A_Maisonette', 'model.Model_A2',
+                 'model.New_Gen', 'model.Premium_Apartment',
+                 'model.Premium_Apartment.', 'model.Simplified',
+                 'model.Standard', 'model.Terrace', 'model.Type_S1',
+                 'model.Type_S2', 'Improved-Maisonette', 'model.Multi_Generation',
+                 'model.Premium_Apartment_Loft', 'model.Premium_Maisonette')
+all_models <- list()
+for(i in seq(1, length(Flat_models))){
+  train.data <- hdb.comp %>% filter(Flat_model == Flat_models[i])
+  model <- lm(Resale_price ~ Floor_area + Remaining_lease +
+              `2 ROOM` + `3 ROOM` + `4 ROOM` + `5 ROOM`+
+              Hawker_Count + Mall_Count + MLRT_Count + PSchool_Count +
+              Premium_PSchool_Count + Supermarkets_Count + PPreschools_Count +
+              Eldercare_Count, data = train.data)
+  all_models <- append(all_models, list(model))
+}
+
+# Putting models into a dataframe
+models.df <- as.data.frame(matrix(0,20,1), row.names = model_names)
+colnames(models.df) <- 'model'
+models.df$model <- all_models
+
+summary(models.df['model.Improved',][[1]])
+```
+
+
+
+

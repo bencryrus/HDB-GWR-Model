@@ -1,0 +1,435 @@
+---
+title: "Data Cleaning"
+output: html_document
+---
+Libraries
+```{r message=FALSE, warning=FALSE}
+packages = c('sf','httr', 'jsonlite', 'tidyverse', 'zoo', 'rgdal', 'spdep', 'tmap',
+             'REAT', 'SpatialAcc')
+for (p in packages){
+  if(!require(p, character.only = T)){
+    install.packages(p)
+  }
+  library(p,character.only = T)
+}
+```
+
+OneMap API query
+```{r message=FALSE, warning=FALSE}
+onemap.query <- function(data_name, csv_name){
+  # Setting parameters for query
+  searchVal <- 'https://developers.onemap.sg/commonapi/search?searchVal='
+  returnGeom <- '&returnGeom=Y'
+  getAddrDetails<- '&getAddrDetails=Y&pageNum=1'
+  query_address <- data_name$query
+  query_result <- tibble()
+  
+  # Sending query to OneMap
+  for(i in query_address){
+    res <- GET(url = paste(searchVal, i, 
+                           returnGeom, getAddrDetails, sep = '' ))
+    data.parsed <- content(res, as = 'parsed')
+    query.data <- data.parsed$results
+    query.data <- query.data %>% bind_rows()
+    query_result <- bind_rows(query_result, query.data[1,])
+  }
+  
+  # Exporting results to csv
+  query_result$query_sent <- query_address
+  onemap.output <- cbind(data_name, query_result)
+  write.csv(onemap.output, csv_name)
+  
+  # Checking for missing output
+  missing.output <- onemap.output[is.na(onemap.output$SEARCHVAL), 'Name']
+  print('Missing outputs: ')
+  if(is_empty(missing.output)){
+    print('None')
+  }else{
+    print(missing.output)
+  }
+}
+```
+
+OneMap queries [Don't run]
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# HDB
+hdb.prices <- read_csv('data/aspatial/Resale-flat-prices-based-on-registration-date-from-jan-2015-onwards.csv')
+
+hdb.prices$query <- paste(hdb.prices$block, 
+                          gsub(' ','%20', hdb.prices$street_name),
+                          sep = '%20')
+hdb.prices <- hdb.prices[1:26367, ]
+
+# Shopping malls
+malls <- read_csv('data/aspatial/List of shopping malls.csv')
+malls$query <- gsub(' ','%20',malls$Name)
+onemap.query(malls, 'data/aspatial/test.csv')
+
+# Private hawker centres
+p.hawkers <- read_csv('data/aspatial/Private coffeeshops.csv')
+p.hawkers$query <- as.character(p.hawkers$`Postal code`)
+onemap.query(p.hawkers, 'data/aspatial/coffeeshopslocation.csv')
+
+# Primary schools
+pschool.data <- read_csv('data/aspatial/Primary schools 2017 registration results.csv')
+pschool.data$query <- gsub(' ', '%20', pschool.data$Name)
+onemap.query(pschool.data, 'data/aspatial/Primary_Schools_Location.csv')
+
+# Premium Primary schools
+pschool.data <- pschool.data %>%
+  mutate(ad.rate = (`Total Vacancy`-`Phase 2C Vacancy`)/`Total Vacancy`) %>%
+  mutate(percentile = rank(ad.rate)/nrow(pschool.data))
+premium.pschool <- pschool.data[pschool.data$percentile > 0.75, 'Name']
+premium.pschool$query <- premium.pschool$Name
+premium.pschool$query <- gsub(' ','%20',premium.pschool$query)
+onemap.query(premium.pschool, 'data/aspatial/Premium_Primary_Schools_Location.csv')
+```
+
+HDB data
+```{r}
+# Import HDB data
+hdb.data <- read_csv('data/aspatial/HDB Resale Prices with Location Data (2015-2018).csv')
+
+# Format coordinates and filter dates
+hdb.data$X <- as.numeric(hdb.data$X)
+hdb.data$Y <- as.numeric(hdb.data$Y)
+
+#Use the filter here accordingly
+hdb.data$date <- as.yearmon(hdb.data$month, format = '%Y-%m') 
+hdb.data <- filter(hdb.data, date <= 'Dec 2018' & date >= 'Jan 2018')
+
+colnames(hdb.data)[1] <- 'SN'
+hdb.data.sf <- st_as_sf(hdb.data, coords = c('X','Y'), crs = 3414)
+
+# Import MPSZ
+mpsz <- st_read(dsn = 'data/spatial', layer = 'MP14_SUBZONE_WEB_PL')
+mpsz <- st_transform(mpsz, 3414)
+
+# Plots
+plot(mpsz$geometry)
+plot(hdb.data.sf$geometry, add = TRUE)
+```
+
+Number of hawker centres in x metres
+```{r}
+# Private hawker centres
+p.hawkers.data <- read_csv('data/aspatial/coffeeshopslocation.csv')
+p.hawkers.data.sf <- st_as_sf(p.hawkers.data, coords = c('X','Y'), crs = 3414) %>%
+  select(Name, Address)
+
+# Public hawker centres
+hawkers <- readOGR('data/aspatial/hawker-centres-kml.kml', 'HAWKERCENTRE')
+ogrListLayers('data/aspatial/hawker-centres-kml.kml')
+proj <- proj4string(as_Spatial(mpsz))
+hawkers <- spTransform(hawkers, CRS(proj))
+
+hawkers.names <- str_match(hawkers@data$Description, 
+                           '<th>NAME</th> <td>(.*?)</td>')[,2]
+hawkers.address <- str_match(hawkers@data$Description, 
+                           '<th>ADDRESS_MYENV</th> <td>(.*?)</td>')[,2]
+hawkers.description <- str_match(hawkers@data$Description, 
+                           '<th>DESCRIPTION_MYENV</th> <td>(.*?)</td>')[,2]
+hawkers.data <- data.frame(Name = hawkers.names,
+                           Address = hawkers.address,
+                           X = hawkers@coords[,1],
+                           Y = hawkers@coords[,2])
+
+hawkers.data.sf <- st_as_sf(hawkers.data, 
+                            coords = c('X','Y'), 
+                            crs = 3414)
+
+# Combine private and public hawker centres
+hawkers.comp.sf <- rbind(p.hawkers.data.sf, hawkers.data.sf)
+
+# Counting
+hdb.data.sfb <- st_buffer(hdb.data.sf, dist = 1000)
+hdb.hawkers <- st_join(hdb.data.sfb, hawkers.comp.sf)
+hdb.hawkers <- hdb.hawkers %>% group_by(SN) %>%
+  mutate(Hawker_Count = n_distinct(Name, na.rm = TRUE)) %>%
+  distinct(SN, .keep_all= TRUE) %>%
+  select(SN, POSTAL, Hawker_Count)
+```
+
+Number of malls in x metres
+```{r}
+# Getting the data
+malls.data <- read_csv('data/aspatial/Shopping mall locations.csv')
+malls.data.sf <- st_as_sf(malls.data, coords = c('X','Y'), crs = 3414)
+malls.data.sf <- select(malls.data.sf, 'Name', 'geometry')
+
+# Counting
+hdb.data.sfb <- st_buffer(hdb.data.sf, dist = 1000)
+hdb.malls <- st_join(hdb.data.sfb, malls.data.sf)
+hdb.malls$Name <- as.character(hdb.malls$Name)
+hdb.malls <- hdb.malls %>% group_by(SN) %>%
+  mutate(Mall_Count = n_distinct(Name, na.rm = TRUE)) %>%
+  distinct(SN, .keep_all= TRUE) %>%
+  select(SN, POSTAL, Mall_Count)
+```
+
+Number of premium schools in x metres
+```{r}
+# Getting the data
+ppschools.data <- read_csv('data/aspatial/Premium_Primary_Schools_Location.csv')
+ppschools.data.sf <- st_as_sf(ppschools.data, coords = c('X','Y'), crs = 3414)
+ppschools.data.sf <- select(ppschools.data.sf, 'Name', 'geometry')
+
+# Counting
+hdb.data.sfb <- st_buffer(hdb.data.sf, dist = 1000)
+hdb.ppschools <- st_join(hdb.data.sfb, ppschools.data.sf)
+hdb.ppschools <- hdb.ppschools %>% group_by(SN) %>%
+  mutate(Premium_PSchool_Count = n_distinct(Name, na.rm = TRUE)) %>%
+  distinct(SN, .keep_all= TRUE) %>%
+  select(SN, POSTAL, Premium_PSchool_Count)
+```
+
+
+Number of primary schools in x metres
+```{r}
+# Getting the data
+pschools.data <- read_csv('data/aspatial/Primary_Schools_Location.csv')
+pschools.data.sf <- st_as_sf(pschools.data, coords = c('X','Y'), crs = 3414)
+pschools.data.sf <- select(pschools.data.sf, 'Name', 'geometry')
+
+# Counting
+hdb.data.sfb <- st_buffer(hdb.data.sf, dist = 1000)
+hdb.pschools <- st_join(hdb.data.sfb, pschools.data.sf)
+hdb.pschools <- hdb.pschools %>% group_by(SN) %>%
+  mutate(PSchool_Count = n_distinct(Name, na.rm = TRUE)) %>%
+  distinct(SN, .keep_all= TRUE) %>%
+  select(SN, POSTAL, PSchool_Count)
+```
+
+Number of supermarkets in x metres
+```{r}
+# Getting the data
+supermarkets <- readOGR('data/spatial/supermarkets-kml.kml')
+ogrListLayers('data/spatial/supermarkets-kml.kml')
+supermarkets <- spTransform(supermarkets, CRS(proj))
+
+supermarkets.names <- str_match(supermarkets@data$Description, 
+                           '<th>LIC_NAME</th> <td>(.*?)</td>')[,2]
+
+supermarkets.data <- data.frame(Name = supermarkets.names,
+                           LONGITUDE = supermarkets@coords[,1],
+                           LATITUDE = supermarkets@coords[,2])
+
+supermarkets.data.sf <- st_as_sf(supermarkets.data, 
+                            coords = c('LONGITUDE','LATITUDE'), 
+                            crs = 3414)
+# Counting
+hdb.data.sfb <- st_buffer(hdb.data.sf, dist = 1000)
+hdb.supermarkets <- st_join(hdb.data.sfb, supermarkets.data.sf)
+hdb.supermarkets$Name <- as.character(hdb.supermarkets$Name)
+hdb.supermarkets <- hdb.supermarkets %>% group_by(SN) %>%
+  mutate(Supermarket_Count = n_distinct(Name, na.rm = TRUE)) %>%
+  distinct(SN, .keep_all= TRUE) %>%
+  select(SN, POSTAL, Supermarket_Count)
+
+```
+
+Number of MRT/LRT in x metres
+```{r}
+# Getting the data
+mlrt <- readOGR('data/spatial/MRTLRTStnPtt.shp')
+mlrt <- spTransform(mlrt, CRS(proj))
+mlrt.sf <- st_as_sf(mlrt) %>%
+  mutate(NAME = paste(STN_NAME, ' - ', STN_NO))
+
+# Counting
+hdb.mlrt <- st_join(hdb.data.sfb, mlrt.sf)
+hdb.mlrt <- hdb.mlrt %>% group_by(SN) %>%
+  mutate(MLRT_Count = n_distinct(NAME, na.rm = TRUE)) %>%
+  distinct(SN, .keep_all= TRUE) %>%
+  select(SN, POSTAL, MLRT_Count)
+
+```
+
+Preschools
+```{r}
+# Getting the data
+preschools <- readOGR('data/spatial/PRESCHOOL.shp')
+preschools <- spTransform(preschools, CRS(proj))
+preschools.sf <- st_as_sf(preschools)
+
+# Filter attempt
+patterns <- c('ODYSSEY', 'LORNA WHISTON', 'SHAWS CLDC', 'CHILDFIRST', 'ETONHOUSE',
+              'KIDDIWINKIE', 'LITTLE FOOTPRINTS', 'BRIGHTON MONTESSORI',
+              'POSSA', 'LITTLE SKOOL-HOUSE', 'MINDCHAMPS', 'LITTLE VILLAGE',
+              'MULBERRY', 'LEARNING VISION')
+ppreschools.sf <- preschools.sf[grepl(paste(patterns, collapse="|"),
+                                     preschools.sf$CENTRE_NAM),]
+
+# Counting
+hdb.preschools <- st_join(hdb.data.sfb, preschools.sf)
+hdb.preschools <- hdb.preschools %>% group_by(SN) %>%
+  mutate(Preschool_Count = n_distinct(CENTRE_NAM, na.rm = TRUE)) %>%
+  distinct(SN, .keep_all= TRUE) %>%
+  select(SN, POSTAL, Preschool_Count)
+```
+
+Elderly care centres
+```{r}
+eldercare <- readOGR('data/spatial/ELDERCARE.shp')
+eldercare <- spTransform(eldercare, CRS(proj))
+eldercare.sf <- st_as_sf(eldercare)
+
+hdb.eldercare <- st_join(hdb.data.sfb, eldercare.sf)
+hdb.eldercare <- hdb.eldercare %>% group_by(SN) %>%
+  mutate(Eldercare_Count = n_distinct(NAME, na.rm = TRUE)) %>%
+  distinct(SN, .keep_all= TRUE) %>%
+  select(SN, POSTAL, Eldercare_Count)
+```
+
+Putting everything together
+```{r}
+hdb.comp <- do.call('cbind', list(hdb.data.sf,
+                                  hdb.hawkers$Hawker_Count,
+                                  hdb.malls$Mall_Count,
+                                  hdb.mlrt$MLRT_Count,
+                                  hdb.pschools$PSchool_Count,
+                                  hdb.ppschools$Premium_PSchool_Count,
+                                  hdb.supermarkets$Supermarket_Count,
+                                  hdb.preschools$Preschool_Count,
+                                  hdb.eldercare$Eldercare_Count))
+colnames(hdb.comp)[25:32] <- c('Hawker_Count', 'Mall_Count', 'MLRT_Count', 
+                               'PSchool_Count', 'Premium_PSchool_Count',
+                               'Supermarkets_Count', 'Preschools_Count',
+                               'Eldercare_Count')
+hdb.comp <- hdb.comp %>% select(-date)
+
+colnames(hdb.comp) <- c('SN','Month','Town','Flat_type','Block','Street_name',
+                        'Storey_range','Floor_area','Flat_model','Lease_commenced',
+                        'Remaining_lease','Resale_price','Query','SEARCHVAL',
+                        'BLK_NO','ROAD_NAME','BUILDING','ADDRESS','POSTAL',
+                        'LATITUDE','LONGITUDE','LONGTITUDE','Query_sent',
+                        'Hawker_Count', 'Mall_Count', 'MLRT_Count', 
+                        'PriSchool_Count', 'PPriSchool_Count', 
+                        'Supermarket_Count', 'PPreSchool_Count',
+                        'Eldercare_Count')
+
+# Converting storey_range into numeric
+hdb.comp$Storey <- (as.numeric(substr(hdb.comp$Storey_range,7,9)) + 
+                      as.numeric(substr(hdb.comp$Storey_range,1,2)))/2
+
+# Binning flat_type
+Flat_type <- sort(unique(hdb.comp$Flat_type))
+for(i in Flat_type){
+  hdb.comp[,as.character(i)] <- ifelse(hdb.comp$Flat_type == i,1,0)
+}
+
+# Binning flat_model
+Flat_models <- sort(unique(hdb.comp$Flat_model))
+for(i in Flat_models){
+  hdb.comp[,as.character(i)] <- ifelse(hdb.comp$Flat_model == i,1,0)
+}
+
+# Export to shp
+writeOGR(obj = as_Spatial(hdb.comp), dsn = 'data',
+         layer = 'HDB Compiled 2018', driver = 'ESRI Shapefile')
+
+```
+
+Export data to SHP
+```{r}
+# Export attribute data
+adata <- list(st_as_sf(hawkers.comp.sf),st_as_sf(malls.data.sf),
+              st_as_sf(mlrt.sf),st_as_sf(pschools.data.sf),
+              st_as_sf(ppschools.data.sf),
+              st_as_sf(supermarkets.data.sf),
+              st_as_sf(preschools.sf),st_as_sf(eldercare.sf),
+              st_as_sf(ppreschools.sf))
+adata.names <- list('Hawkers', 'Malls', 'MLRT', 'Primary schools',
+                 'Premium primary schools', 'Supermarkets',
+                 'Preschools', 'Eldercare','Premium preschools')
+for(i in seq(1,9)){
+  writeOGR(obj=as_Spatial(adata[[i]]),
+         dsn = 'data/spatial/attributes', 
+         layer = adata.names[[i]] ,driver="ESRI Shapefile")
+}
+
+# Export HDB attribute data
+hdb.adata <- list(st_as_sf(hdb.hawkers), st_as_sf(hdb.malls), st_as_sf(hdb.mlrt),
+           st_as_sf(hdb.ppschools), st_as_sf(hdb.pschools), 
+           st_as_sf(hdb.supermarkets), st_as_sf(hdb.preschools), 
+           st_as_sf(hdb.eldercare), hdb.comp)
+hdb.anames <- list('Hawkers', 'Malls', 'MLRT', 'Primary schools',
+                 'Premium primary schools', 'Supermarkets',
+                 'Preschools', 'Eldercare', 'HDB Compiled')
+for(i in seq(1,8)){
+  writeOGR(obj=as_Spatial(wdata[[i]]),
+         dsn = 'data/spatial/HDB2018', 
+         layer = wdata.names[[i]] ,driver="ESRI Shapefile")
+}
+
+# Ad-hoc export
+writeOGR(obj = as_Spatial(st_as_sf(hawkers.comp.sf)), dsn = 'data',
+         layer = 'hawkers', driver = 'ESRI Shapefile')
+```
+
+Data cleaning for GWR model
+```{r}
+# Import
+hdb.comp <- readOGR('data/spatial/HDB2018/HDB Comp Aug to Dec 2018.shp')
+colnames(hdb.comp@data) <- c('SN','Month','Town','Flat_type','Block','Street_name','Storey_range',
+                        'Floor_area','Flat_model','Lease_commenced',
+                        'Remaining_lease','Resale_price','Query','SEARCHVAL',
+                        'BLK_NO','ROAD_NAME','BUILDING','ADDRESS','POSTAL',
+                        'LATITUDE','LONGITUDE','LONGTITUDE','Query_sent',
+                        'Hawker_Count', 'Mall_Count', 'MLRT_Count', 
+                        'PriSchool_Count', 'PPriSchool_Count', 
+                        'Supermarket_Count', 'PPreSchool_Count',
+                        'Eldercare_Count', 'Storey',
+                        '1 ROOM', '2 ROOM', '3 ROOM', '4 ROOM', '5 ROOM',
+                        'EXECUTIVE', 'MULTI-GENERATION', 
+                        'Adjoined flat', 'Apartment', 'DBSS', 'Improved',
+                        'Improved-Maisonette', 'Maisonette', 
+                        'Model A', 'Model A-Maisonette',
+                        'Model A2', 'Multi Generation', 'New Generation', 
+                        'Premium Apartment', 'Premium Apartment Loft', 
+                        'Premium Apartment.','Premium Maisonette', 
+                        'Simplified', 'Standard', 'Terrace', 
+                        'Type S1', 'Type S2')
+hdb.comp.sf <- st_as_sf(hdb.comp)
+hdb.comp.sf <- st_difference(hdb.comp.sf)
+
+# Filter date
+hdb.comp.sf$date <- as.yearmon(hdb.comp.sf$Month, format = '%Y-%m') 
+hdb.comp.sf <- filter(hdb.comp.sf, date >= 'Oct 2018' & date <= 'Dec 2018')
+hdb.comp.sf <- select(hdb.comp.sf, -date)
+
+# Convert to spatial
+hdb.comp.sp <- as_Spatial(hdb.comp.sf)
+
+# Flat type encoding
+ft_encoding <- function(data){
+  data$Flat_type <- as.character(data$Flat_type)
+  data[data$Flat_type == '1 ROOM', 'Flat_type'] <- 1
+  data[data$Flat_type == '2 ROOM', 'Flat_type'] <- 2
+  data[data$Flat_type == '3 ROOM', 'Flat_type'] <- 3
+  data[data$Flat_type == '4 ROOM', 'Flat_type'] <- 4
+  data[data$Flat_type == '5 ROOM', 'Flat_type'] <- 5
+  data[data$Flat_type == 'EXECUTIVE', 'Flat_type'] <- 6
+  data[data$Flat_type == 'MULTI-GENERATION', 'Flat_type'] <- 7
+  data$Flat_type <- as.numeric(data$Flat_type)
+}
+hdb.comp.sp$Flat_type <- ft_encoding(hdb.comp.sp)
+
+# Combining flat models
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Adjoined flat' , 'Flat_model'] <- 'DBSS'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Apartment' , 'Flat_model'] <- 'DBSS'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Improved-Maisonette' , 'Flat_model'] <- 'Maisonette'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Model A-Maisonette' , 'Flat_model'] <- 'Maisonette'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Model A2' , 'Flat_model'] <- 'Model A'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Multi Generation' , 'Flat_model'] <- 'DBSS'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'New Generation' , 'Flat_model'] <- 'Improved'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Premium Apartment.' , 'Flat_model'] <- 'Premium Apartment'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Terrace' , 'Flat_model'] <- 'DBSS'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Type S1' , 'Flat_model'] <- 'DBSS'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Type S2' , 'Flat_model'] <- 'DBSS'
+hdb.comp.sp[hdb.comp.sp$Flat_model == 'Standard' , 'Flat_model'] <- 'Improved'
+
+writeOGR(obj = hdb.comp.sp, dsn = 'data',
+         layer = 'HDB Compiled GWR 2018', driver = 'ESRI Shapefile')
+```
+
